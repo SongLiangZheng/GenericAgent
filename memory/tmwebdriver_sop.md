@@ -8,6 +8,36 @@
 - ⚠web_execute_js里使用`await`时需**显式`return`**才能拿到返回值（底层async包裹，不写return则返回null）
 - ✅web_scan自动穿透同源iframe；跨域iframe需CDP或postMessage（见下方章节）
 
+## 何时升级（判定表）
+- 默认顺序：先`web_scan`读状态，再`web_execute_js`做常规DOM操作；只有命中明确边界信号时，才升级到CDP桥或物理操作
+- 本SOP职责：记录浏览器工具链的特性/限制/升级手段；`web_setup_sop`只在web工具本身不可用时用于安装与排障
+
+### 先问6个问题
+1. 页面元素是否就在当前DOM，且不是跨域iframe？
+   - 是：先`web_scan` + `web_execute_js`
+   - 否：若是跨域iframe，直接按CDP方案处理
+2. 这个动作是否依赖真实用户事件（`isTrusted`）？
+   - 是/疑似是：升级CDP
+3. 是否涉及文件上传？
+   - 是：直接CDP `DOM.setFileInputFiles`
+4. 是否涉及浏览器级能力（Cookie、tab、下载权限、扩展）？
+   - 是：直接走CDP桥JSON命令
+5. 是否需要跨tab或后台tab稳定执行？
+   - 是：CDP显式指定`tabId`；必要时`Page.bringToFront`
+6. web工具本身是否不可用？
+   - 是：先按本文件“连不上排查”检查；确认后再进入`web_setup_sop`
+
+### 常见任务的首选路线
+- 普通读文本/点按钮/表单填写：先`web_scan`/`web_execute_js`
+- 同源iframe：仍优先`web_scan`/`web_execute_js`
+- 跨域iframe：直接CDP（`Page.getFrameTree` / `Page.createIsolatedWorld` / `Runtime.evaluate`）
+- 文件上传：直接CDP，失败再物理点击
+- 打不开新tab、按钮`click()`无反应、疑似被`isTrusted`拦截：升级CDP
+- Cookie/扩展/下载权限/跨tab路由：直接CDP桥
+- 高清截图、后台页截图、验证码图像：优先CDP截图或`canvas.toDataURL()`
+- blob/PDF下载：优先页内`fetch/blob`方案；跨域/CORS受限时先导航同域再处理
+- closed Shadow DOM或需精确坐标点击：升级CDP DOM域
+
 ## 限制(isTrusted)
 - JS事件`isTrusted=false`，敏感操作（如文件上传/部分按钮）可能被拦截；这类场景首选**CDP桥**
 - ⚠JS点击按钮打不开新tab→可能是浏览器弹窗拦截，换CDP点击试试
@@ -72,6 +102,7 @@ web_execute_js script='{"cmd": "batch", "commands": [...]}'
     - 瞬态input的核心是**缩短发现→setFileInputFiles时间窗**：优先同batch完成；再不行用DOM事件监听；猴子补丁仅作兜底思路
   - ⚠tabId：CDP默认sender.tab.id(当前注入页)，跨tab需显式tabId或先batch内tabs查
 - ⭐跨tab无需前台：指定tabId即可操作后台标签页
+- ⚠CDP命令里的 `tabId` 必须是**整数**，传字符串会报 `Invalid type: expected integer, found string`
 
 ## CDP点击完整生命周期（未验证，BBS#23）
 - 通用点击需**三事件序列**：mouseMoved → mousePressed → mouseReleased（间隔50-100ms）

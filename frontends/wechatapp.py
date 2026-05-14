@@ -306,6 +306,13 @@ def on_message(bot, msg):
     text = bot.extract_text(msg).strip()
     uid = msg.get('from_user_id', '')
     ctx = msg.get('context_token', '')
+    # 持久化 user_id 供主动推送使用
+    if uid:
+        try:
+            _uid_file = os.path.join(_TEMP_DIR, 'wx_user_id.txt')
+            if not os.path.exists(_uid_file) or open(_uid_file).read().strip() != uid:
+                open(_uid_file, 'w').write(uid)
+        except Exception: pass
     media_paths = _dl_media(msg.get('item_list', []))
     if not text and not media_paths: return
     if media_paths:

@@ -9,6 +9,7 @@
 - subagent的cwd还是temp，不是task目录
 - input：目标+约束即可，subagent同等智能。**禁写步骤/过度描述**，大量数据给路径
 - 通信：output.txt(append,`[ROUND END]`=轮完成) → 写reply.txt继续 → 不写10min退出。reply后输出为output1/2/3.txt(同格式)
+- **⚠ --bg一次性任务完成信号是output.txt存在，而非进程退出**：subagent写完output后仍等reply.txt，进程存活+stdout.log为空 均属正常，勿误判为无输出
 - 干预文件：`_stop`(当轮结束退出) | `_keyinfo`(注入working memory) | `_intervene`(追加指令)
 - **主agent空闲时应读output观察进度，必要时用干预文件纠偏，禁止无脑长时间sleep轮询**
 - 监察模式启动时加`--verbose`，output将包含工具执行结果，主agent可直接审查原始数据而非仅信任摘要
