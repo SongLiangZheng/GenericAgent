@@ -57,3 +57,69 @@
 - **标签结构**：推荐/精选/最新，各15人固定，无翻页/无限滚动
 - **打招呼成功弹窗**：顶层document弹出「已向牛人发送招呼」+ 相似候选人推荐面板(`.similar-geek-wrap`)需关闭
 - **候选人信息提取**：`card.innerText` 包含姓名/年龄/学历/实习经历等，每人约200字符
+
+---
+
+## 处理新招呼 SOP（沟通页）
+
+### 概述
+在沟通页的「新招呼」列表中，对主动投递/系统匹配的候选人按岗位画像进行批量筛选：匹配→求简历+换电话，不匹配→标为不合适。
+
+> **术语说明**：用户所说「打招呼」= 点击「求简历」按钮（非发消息）。报告输出到 `ai-boss\process-hi\` 目录。
+> **报告要求**：无论通过与否，所有候选人都必须写进报告（匹配+淘汰+错误全列出）。
+
+### 流程步骤
+
+#### Step 0: 确认岗位画像（必须）
+- **启动前必须ask_user确认**：目标岗位名称 + 筛选条件
+- 示例问法：「请确认要处理哪个岗位的新招呼？需要的筛选条件是什么？（如：年龄、学历、性别、经验要求）」
+- 用户回复后，提取并确认：岗位名、各项筛选条件、匹配/不匹配时的操作
+
+#### Step 1: 导航到新招呼页面
+- URL: `https://www.zhipin.com/web/chat/new_greet`
+- ⚠️ **SPA重定向**：实际会跳转到 `chat/index`，新招呼是其中的标签页，不是独立页面
+- 切换标签：`document.querySelectorAll('.chat-label-item')` 找 title 含「新招呼」→ **必须 mouseenter + click(bubbles:true)** 才生效
+- 确认标签激活：检查 `.chat-label-item.selected` 的 title 含「新招呼」
+
+#### Step 2: 选择目标岗位（必须）
+- 在新招呼列表顶部，有岗位筛选下拉
+- **必须先选择目标岗位**（如「后台开发工程师」），否则列表混杂多岗位候选人
+- **已验证选择器**：`.dropmenu-label.chat-select-job` → mouseenter+click → 等500ms → `.ui-dropmenu-list li` 含目标岗位名 → mouseenter+click
+- 注意：同样需要 mouseenter 触发hover态后再 click，否则click无响应
+
+#### Step 3: 注入自动化脚本
+- 注入后台IIFE脚本，含：
+  - 浮动状态面板（右上角，显示进度/统计/停止按钮）
+  - `window._stopBossBot = true` 可随时中止
+  - `window._bossBotStats` 可查询进度
+
+#### Step 4: 逐人评估与操作
+
+**评估逻辑（从右侧面板 `.base-info-single-container` 提取）：**
+- **年龄**：`baseText.match(/(\d+)岁/)`
+- **学历**：匹配 `本科|硕士|博士` 等
+- **性别**：`baseHTML.includes('icon-icon-men')` = 男；`icon-icon-women` = 女
+- **经验关键词**：搜索 baseText + 聊天消息中的行业/技术关键词
+
+**操作-不合适：**
+1. 点击 `span.operate-btn`（文本="不合适"），需 mouseenter + click
+2. 等待弹窗出现（`.not-fit-wrap` 内层，height > 0）
+3. 点击对应 `.reason-item`（薪资不符/学历不符/年龄不符/期望不符/距离太远/过往经历不符/简历不真实/已找到工作/其他原因）
+4. 系统自动跳到下一位候选人
+
+**操作-匹配（求简历+换电话）：**
+1. 点击 `span.operate-btn`（文本="求简历"）
+2. 确认弹窗中点击确认按钮
+3. 点击 `span.operate-btn`（文本="换电话"，需检查是否disabled）
+4. 手动点击下一个 `.geek-item` 前进
+
+#### Step 5: 列表滚动加载
+- 初始加载约40条，处理后自动前进
+- 列表耗尽时，滚动 `.chat-user-list` / `.geek-list` 触发加载更多
+
+### 关键技术细节（已验证）
+- **左侧列表项**：`.geek-item`，选中态 `.geek-item.selected`
+- **候选人名**：`.geek-name`；**岗位**：`.source-job`
+- **不合适按钮嵌套**：外层 `.not-fit-wrap`（始终可见）→ 内层弹窗（display:none，点击后显示）
+- **操作节奏**：~2s主延迟 + 0.8s短延迟，约5秒/人
+- **脚本控制**：`window._stopBossBot=true` 停止；`window._bossBotStats` 读状态
