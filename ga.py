@@ -1,7 +1,7 @@
 import sys, os, re, json, time, threading, importlib
 from datetime import datetime
 from pathlib import Path
-import tempfile, traceback, subprocess, itertools, collections, difflib
+import tempfile, traceback, subprocess, itertools, collections, difflib, shutil
 if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -9,7 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from agent_loop import BaseHandler, StepOutcome, json_default
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=[]):
+def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000):
     """代码执行器
     python: 运行复杂的 .py 脚本（文件模式）
     powershell/bash: 运行单行指令（命令模式）
@@ -26,34 +26,11 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         tmp_file.close()
         cmd = [sys.executable, "-X", "utf8", "-u", tmp_path]   
     elif code_type in ["powershell", "bash", "sh", "shell", "ps1", "pwsh"]:
-        # 自动集成rtk：检查是否应该使用rtk包装
-        try:
-            # sys is already imported globally
-            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp')
-            smart_rtk_path = os.path.join(temp_dir, 'smart_rtk.py')
-            if os.path.exists(smart_rtk_path):
-                sys.path.insert(0, temp_dir)
-                from smart_rtk import should_use_rtk
-                # 判断是否应该使用rtk
-                if should_use_rtk(code.split()):
-                    # 使用rtk包装命令
-                    rtk_path = os.path.join(os.path.expanduser('~'), '.local', 'bin', 'rtk.exe')
-                    if os.path.exists(rtk_path):
-                        if os.name == 'nt': cmd = [rtk_path, "powershell", "-NoProfile", "-NonInteractive", "-Command", code]
-                        else: cmd = [rtk_path, "bash", "-c", code]
-                    else:
-                        if os.name == 'nt': cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", code]
-                        else: cmd = ["bash", "-c", code]
-                else:
-                    if os.name == 'nt': cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", code]
-                    else: cmd = ["bash", "-c", code]
-            else:
-                if os.name == 'nt': cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", code]
-                else: cmd = ["bash", "-c", code]
-        except Exception:
-            # rtk集成失败，回退到正常执行
-            if os.name == 'nt': cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", code]
-            else: cmd = ["bash", "-c", code]
+        if os.name == 'nt':
+            _ps = "pwsh" if shutil.which("pwsh") else "powershell"
+            utf8_prefix = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            cmd = [_ps, "-NoProfile", "-NonInteractive", "-Command", utf8_prefix + code]
+        else: cmd = ["bash", "-c", code]
     else:
         return {"status": "error", "msg": f"不支持的类型: {code_type}"}
     print("code run output:") 
@@ -77,7 +54,8 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     try:
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=0, cwd=cwd, startupinfo=startupinfo
+            bufsize=0, cwd=cwd, startupinfo=startupinfo,
+            creationflags=0x08000000 if os.name == 'nt' else 0
         )
         start_t = time.time()
         t = threading.Thread(target=stream_reader, args=(process, full_stdout), daemon=True)
@@ -85,7 +63,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
 
         while t.is_alive():
             istimeout = time.time() - start_t > timeout
-            if istimeout or len(stop_signal) > 0:
+            if istimeout or stop_signal:
                 process.kill()
                 print("[Debug] Process killed due to timeout or stop signal.")
                 if istimeout: full_stdout.append("\n[Timeout Error] 超时强制终止")
@@ -106,7 +84,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         if process.stdout: threading.Thread(target=process.stdout.close, daemon=True).start()
         return {
             "status": status,
-            "stdout": smart_format(stdout_str, max_str_len=10000, omit_str='\n\n[omitted long output]\n\n'),
+            "stdout": smart_format(stdout_str, max_str_len=maxlen, omit_str='\n\n[omitted long output]\n\n'),
             "exit_code": exit_code
         }
     except Exception as e:
@@ -136,7 +114,7 @@ def first_init_driver():
         #driver.newtab()
         time.sleep(3)
 
-def web_scan(tabs_only=False, switch_tab_id=None, text_only=False):
+def web_scan(tabs_only=False, switch_tab_id=None, text_only=False, maxlen=35000):
     """获取当前页面的简化HTML内容和标签页列表。注意：简化过程会过滤边栏、浮动元素等非主体内容。
     tabs_only: 仅返回标签页列表，不获取HTML内容（节省token）。
     switch_tab_id: 可选参数，如果提供，则在扫描前切换到该标签页。
@@ -161,8 +139,8 @@ def web_scan(tabs_only=False, switch_tab_id=None, text_only=False):
             }
         }
         if not tabs_only: 
-            importlib.reload(simphtml); result["content"] = simphtml.get_html(driver, cutlist=True, maxchars=35000, text_only=text_only)
-            if text_only: result['content'] = smart_format(result['content'], max_str_len=10000, omit_str='\n\n[omitted long content]\n\n')
+            importlib.reload(simphtml); result["content"] = simphtml.get_html(driver, cutlist=True, maxchars=maxlen, text_only=text_only)
+            if text_only: result['content'] = smart_format(result['content'], max_str_len=maxlen//3, omit_str='\n\n[omitted long content]\n\n')
         return result
     except Exception as e:
         return {"status": "error", "msg": format_error(e)}
@@ -315,8 +293,9 @@ class GenericAgentHandler(BaseHandler):
         raw_path = os.path.join(self.cwd, args.get("cwd", './'))
         cwd = os.path.normpath(os.path.abspath(raw_path))
         code_cwd = os.path.normpath(self.cwd)
+        maxlen = 10000 // args.get('_tool_num', 1)
         if code_type == 'python' and args.get("inline_eval"):
-            ns = {'handler': self, 'parent': self.parent}
+            ns = {'handler':self, 'parent':self.parent, 'history':json.dumps(self.parent.llmclient.backend.history)}
             old_cwd = os.getcwd()
             try:
                 os.chdir(cwd)
@@ -325,7 +304,7 @@ class GenericAgentHandler(BaseHandler):
                     except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
                 except Exception as e: result = f'Error: {e}'
             finally: os.chdir(old_cwd)
-        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
+        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen)
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
     
@@ -343,7 +322,8 @@ class GenericAgentHandler(BaseHandler):
         tabs_only = args.get("tabs_only", False)
         switch_tab_id = args.get("switch_tab_id", None)
         text_only = args.get("text_only", False)
-        result = web_scan(tabs_only=tabs_only, switch_tab_id=switch_tab_id, text_only=text_only)
+        maxlen = 35000 // args.get('_tool_num', 1)
+        result = web_scan(tabs_only=tabs_only, switch_tab_id=switch_tab_id, text_only=text_only, maxlen=maxlen)
         content = result.pop("content", None)
         yield f'[Info] {str(result)}\n'
         if content: result = json.dumps(result, ensure_ascii=False, default=json_default) + f"\n```html\n{content}\n```"
@@ -368,15 +348,15 @@ class GenericAgentHandler(BaseHandler):
             try:
                 with open(abs_path, 'w', encoding='utf-8') as f: f.write(str(content))
                 result["js_return"] += f"\n\n[已保存完整内容到 {abs_path}]"
-            except:
-                result['js_return'] += f"\n\n[保存失败，无法写入文件 {abs_path}]"
+            except: result['js_return'] += f"\n\n[保存失败，无法写入文件 {abs_path}]"
         show = smart_format(json.dumps(result, ensure_ascii=False, indent=2, default=json_default), max_str_len=300)
         try: print("Web Execute JS Result:", show)
         except: pass
         yield f"JS 执行结果:\n{show}\n"
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         result = json.dumps(result, ensure_ascii=False, default=json_default)
-        return StepOutcome(smart_format(result, max_str_len=8000), next_prompt=next_prompt)
+        maxlen = 8000 // args.get('_tool_num', 1)
+        return StepOutcome(smart_format(result, max_str_len=maxlen), next_prompt=next_prompt)
     
     def do_file_patch(self, args, response):
         path = self._get_abs_path(args.get("path", ""))
@@ -437,7 +417,8 @@ class GenericAgentHandler(BaseHandler):
                            count=count, show_linenos=show_linenos)
         if show_linenos and not result.startswith("Error:"): result = '由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n' + result 
         if ' ... [TRUNCATED]' in result: result += '\n\n（某些行被截断，如需完整内容可改用 code_run 读取）'
-        result = smart_format(result, max_str_len=20000, omit_str='\n\n[omitted long content]\n\n')
+        maxlen = 15000 // args.get('_tool_num', 1)
+        result = smart_format(result, max_str_len=maxlen, omit_str='\n\n[omitted long content]\n\n')
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         log_memory_access(path)
         if 'memory' in path or 'sop' in path: 
@@ -466,6 +447,11 @@ class GenericAgentHandler(BaseHandler):
         #next_prompt += '\n[SYSTEM TIPS] 此函数一般在任务开始或中间时调用，如果任务已成功完成应该是start_long_term_update用于结算长期记忆。\n'
         return StepOutcome({"result": "working key_info updated"}, next_prompt=next_prompt)
 
+    def _retry_or_exit(self, prompt):
+        self._empty_ct = getattr(self, '_empty_ct', 0) + 1
+        if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
+        return StepOutcome({}, next_prompt=prompt)
+
     def do_no_tool(self, args, response):
         '''这是一个特殊工具，由引擎自主调用，不要包含在TOOLS_SCHEMA里。
         当模型在一轮中未显式调用任何工具时，由引擎自动触发。
@@ -473,14 +459,12 @@ class GenericAgentHandler(BaseHandler):
         content = getattr(response, 'content', '') or ""
         thinking = getattr(response, 'thinking', '') or ""
         if not response or (not content.strip() and not thinking.strip()):
-            self._empty_ct = getattr(self, '_empty_ct', 0) + 1
-            if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
             yield "[Warn] LLM returned an empty response. Retrying...\n"
-            return StepOutcome({}, next_prompt="[System] Blank response, regenerate and tooluse")
-        if len(content) > 50 and ('[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:]):
-            return StepOutcome({}, next_prompt="[System] Incomplete response. Regenerate and tooluse.")
+            return self._retry_or_exit("[System] Blank response, regenerate and tooluse")
+        if '[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:]:
+            return self._retry_or_exit("[System] Incomplete response. Regenerate and tooluse.")
         if 'max_tokens !!!]' in content[-100:]:
-            return StepOutcome({}, next_prompt="[System] max_tokens limit reached. Use multi small steps to do it.")
+            return self._retry_or_exit("[System] max_tokens limit reached. Use multi small steps to do it.")
         
         if self._in_plan_mode() and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']):
             if 'VERDICT' not in content and '[VERIFY]' not in content and '验证subagent' not in content:
@@ -547,7 +531,7 @@ class GenericAgentHandler(BaseHandler):
                 flush(); parts.append(line); cnt = 0; last = ''
             else: cnt += 1; last = line
         flush()
-        return "\n".join(parts[-150:])
+        return "\n".join(parts[-70:])
 
     def _get_anchor_prompt(self, skip=False):
         if skip: return "\n"
@@ -572,11 +556,13 @@ class GenericAgentHandler(BaseHandler):
             clean_args = {k: v for k, v in args.items() if not k.startswith('_')}
             summary = f"调用工具{tool_name}, args: {clean_args}"
             if tool_name == 'no_tool': summary = "直接回答了用户问题"
-            next_prompt += "\n\n\nUSER: <summary>呢？？？！\n\n"
+            next_prompt += "\n\n\n[SYSTEM] 必须在回复文本中包含<summary>！\n\n"
+            summary = smart_format(summary.replace('\n', ''), max_str_len=40)
         summary = smart_format(summary.replace('\n', ''), max_str_len=80)
         self.history_info.append(f'[Agent] {summary}')
         _plan = self._in_plan_mode()
-        if turn % 65 == 0 and (not _plan):
+
+        if turn % 75 == 0 and (not _plan):
             next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。必须总结情况进行ask_user，不允许继续重试。"
         elif turn % 7 == 0:
             next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
@@ -584,13 +570,13 @@ class GenericAgentHandler(BaseHandler):
 
         if _plan and turn >= 10 and turn % 5 == 0:
             next_prompt = f"[Plan Hint] 正在计划模式。必须 file_read({_plan}) 确认当前步骤，回复开头引用：📌 当前步骤：...\n\n" + next_prompt
-        if _plan and turn >= 90: next_prompt += f"\n\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user 汇报进度并确认是否继续。"
+        if _plan and turn >= 120: next_prompt += f"\n\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user 汇报进度并确认是否继续。"
 
         injkeyinfo = consume_file(self.parent.task_dir, '_keyinfo')
         injprompt = consume_file(self.parent.task_dir, '_intervene')
         if injkeyinfo: self.working['key_info'] = self.working.get('key_info', '') + f"\n[MASTER] {injkeyinfo}"
         if injprompt: next_prompt += f"\n\n[MASTER] {injprompt}\n"
-        for hook in getattr(self.parent, '_turn_end_hooks', {}).values(): hook(locals())  # current readonly
+        for hook in list(getattr(self.parent, '_turn_end_hooks', {}).values()): hook(locals())  # current readonly
         return next_prompt
 
 def get_global_memory():
