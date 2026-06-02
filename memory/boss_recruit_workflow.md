@@ -52,8 +52,11 @@
 
 ## 关键技术细节（已验证）
 - **推荐牛人iframe**：`iframe[name="recommendFrame"]`，同源，用 `iframe.contentDocument` 直接访问
-- **候选人卡片**：`.candidate-card-wrap`（iDoc内查询）
-- **打招呼按钮**：`.btn.btn-greet`；打招呼后变为 `.btn-continue`（继续沟通）= 成功标志
+- **职位切换（推荐牛人页）**：⚠️ 职位下拉在iframe内；点击 `input.chat-job-search` 触发下拉 → 等500ms → iDoc内 `.ui-dropmenu.job-selecter-wrap .job-item` LI点击
+- **候选人卡片**：`.candidate-card-wrap`（iDoc内查询）；`card.innerText` 包含姓名/年龄/学历/公司名/技能
+- **打招呼按钮**：`button.btn.btn-greet`；打招呼后变为 `.btn-continue`（继续沟通）= 成功标志
+- **打招呼弹窗关闭**：成功后顶层document弹出 `.similar-geek-wrap`，点 `.iboss-close` 关闭
+- **简历API推荐牛人页**：⚠️ `/wapi/zpgeek/resume/coach/resume.json` 在推荐牛人页返回404 HTML（不可用），需从 `card.innerText` 直接读取公司名判断行业
 - **标签结构**：推荐/精选/最新，各15人固定，无翻页/无限滚动
 - **打招呼成功弹窗**：顶层document弹出「已向牛人发送招呼」+ 相似候选人推荐面板(`.similar-geek-wrap`)需关闭
 - **候选人信息提取**：`card.innerText` 包含姓名/年龄/学历/实习经历等，每人约200字符
@@ -98,7 +101,7 @@
 **评估逻辑（从右侧面板 `.base-info-single-container` 提取）：**
 - **年龄**：`baseText.match(/(\d+)岁/)`
 - **学历**：匹配 `本科|硕士|博士` 等
-- **性别**：`baseHTML.includes('icon-icon-men')` = 男；`icon-icon-women` = 女
+- **性别**：`baseHTML.includes('icon-icon-man')` = 男；`icon-icon-woman` = 女（⚠️注意单数，非men/women）
 - **经验关键词**：搜索 baseText + 聊天消息中的行业/技术关键词
 
 **操作-不合适：**
@@ -115,11 +118,29 @@
 
 #### Step 5: 列表滚动加载
 - 初始加载约40条，处理后自动前进
-- 列表耗尽时，滚动 `.chat-user-list` / `.geek-list` 触发加载更多
+- 列表耗尽时，优先滚动 `.chat-user-list` / `.geek-list`；若页面滚动无效，改找包含 `.geek-item` 的真实可滚动祖先并滚动它触发加载
 
 ### 关键技术细节（已验证）
 - **左侧列表项**：`.geek-item`，选中态 `.geek-item.selected`
 - **候选人名**：`.geek-name`；**岗位**：`.source-job`
+- **求简历按钮**：`span.operate-btn`（常在 `.operate-icon-item` 下）
+- **求简历确认层**：可能是 hidden 的 `.exchange-tooltip`；若“确定”文本节点 rect=0，仍可直接点击 `.boss-btn-primary.boss-btn` 完成确认
 - **不合适按钮嵌套**：外层 `.not-fit-wrap`（始终可见）→ 内层弹窗（display:none，点击后显示）
 - **操作节奏**：~2s主延迟 + 0.8s短延迟，约5秒/人
 - **脚本控制**：`window._stopBossBot=true` 停止；`window._bossBotStats` 读状态
+
+### 补充验证（新招呼场景）
+- **基础信息来源**：新招呼页性别/年龄/学历不要只读 DOM；优先从 `window.__chatStore` 读取：`gender`（1男/2女）、`geekInfo.geekTag`（tagType 2=年龄，3=学历）
+- **简历经验来源**：金融/Java 经验通过 API `/wapi/zpgeek/resume/coach/resume.json?geekId=XXX&jobId=XXX&security=1` 检查 `experience[]`、`projectExperience[]`、`education[]`
+- **评估顺序**：先用 chatStore 做年龄/学历/性别过滤，再调简历 API 判断金融+Java，减少误判
+- **Tab/岗位筛选持久性**：Bot 注入前必须再次确认 `.chat-label-item.selected` 和岗位下拉已正确激活；运行中不会自动重选
+- **数量含义**：用户给的数量是“处理上限”，不是要求必须匹配到该数量
+- **额外岗位校验**：即使 UI 已筛选，仍应检查 `.source-job` 文本，跳过非目标岗位候选人
+- **等待详情同步**：点击 `.geek-item` 后，轮询 `window.__chatStore.geekId` 变化（≤3s）再读详情，避免拿到上一个候选人数据
+- **脚本注入限制**：此环境 `web_execute_js` 的 `script:` 不支持文件路径，需将脚本代码内联注入
+- **⚠️ 物理点击必须用physClick**：直接 `.click()` 在Boss直聘无效，必须依次派发 mouseenter/mouseover/mousedown/mouseup/click 事件序列，否则按钮不响应（血泪教训）
+- **不合适原因选项**（已验证）：薪资不符|学历不符|年龄不合适|期望不符|距离太远|过往经历不符|简历不真实|已找到工作|其他原因；性别不符→选「过往经历不符」或「其他原因」
+- **求简历禁用(双方回复后可用)**：说明候选人已在沟通中求简历已锁；跳过即可
+- **分3段注入脚本**：Part1工具函数→Part2面板→Part3主循环，避免单次超长脚本被截断；**禁止重复注入Part3**，否则多主循环并发导致重复处理候选人超出目标数量，注入前先检查 `window._bossRunning!==true`
+- **geekId更新等待**：点击候选人后必须轮询 `window.__chatStore.geekId` 变化再读数据，否则读到旧人数据
+- **滚动加载**：页面整体滚动可能无效，需定位包含 `.geek-item` 的真实可滚动祖先触发加载
